@@ -333,7 +333,58 @@ def create_pdf_report(analysis_result, patient_name, sample_type, uploaded_image
         # If this fails, the error will be visible in the streamlit console
         print(f"PDF FINAL ERROR: {e}")
         raise e
-        
+import streamlit as st
+from PIL import Image
+import time
+# ... other imports ...
+
+# --- FIXING THE IMAGE DISPLAY ERROR ---
+def display_analysis_images(original, heatmap):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Original Image")
+        # Older streamlit versions use use_column_width
+        # Newer ones use use_container_width
+        try:
+            st.image(original, use_container_width=True)
+        except TypeError:
+            st.image(original, use_column_width=True)
+            
+    with col2:
+        st.subheader("AI Heatmap")
+        try:
+            st.image(heatmap, use_container_width=True)
+        except TypeError:
+            st.image(heatmap, use_column_width=True)
+
+# --- FIXING THE PDF BUTTON LOGIC ---
+def render_pdf_section(result_data, p_name, s_type, img, heat):
+    st.write("---")
+    st.subheader("Generate Clinical Report")
+    
+    if st.button("Prepare PDF Report"):
+        with st.spinner("Generating PDF..."):
+            try:
+                from pdf_utils import create_pdf_report
+                pdf_data = create_pdf_report(
+                    analysis_result=result_data,
+                    patient_name=p_name,
+                    sample_type=s_type,
+                    uploaded_image=img,
+                    grad_cam_image=heat
+                )
+                
+                st.download_button(
+                    label="Download Report",
+                    data=pdf_data,
+                    file_name=f"Report_{p_name.replace(' ', '_')}.pdf",
+                    mime="application/pdf"
+                )
+                st.success("Report ready!")
+            except Exception as e:
+                # This helps you see the REAL error in the UI
+                st.error(f"PDF Error: {str(e)}")
+                
 import streamlit as st
 import time
 from PIL import Image
@@ -676,6 +727,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
