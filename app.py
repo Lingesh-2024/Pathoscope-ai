@@ -335,18 +335,18 @@ def create_pdf_report(analysis_result, patient_name, sample_type, uploaded_image
         raise e
         
 import streamlit as st
-from fpdf import FPDF
-from fpdf.enums import XPos, YPos # Critical for new versions
+from fpdf import FPDF  # The library is installed as fpdf2 but imported as fpdf
+from fpdf.enums import XPos, YPos 
 import base64
-import io
 
 def generate_pdf_report(analysis_data, user_full_name, user_id):
-    # Use 'helvetica' instead of 'Arial' to avoid font-not-found errors
+    # Initialize the FPDF class (imported from fpdf)
     pdf = FPDF()
     pdf.add_page()
     
     # 1. Header
     pdf.set_font('helvetica', 'B', 20)
+    # Using new_x and new_y for version compatibility
     pdf.cell(0, 15, "PATHOSCOPE AI - DIAGNOSIS REPORT", 
              new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
     
@@ -360,13 +360,13 @@ def generate_pdf_report(analysis_data, user_full_name, user_id):
     pdf.set_fill_color(230, 230, 230)
     pdf.set_font('helvetica', 'B', 12)
     
-    # Row 1
+    # Row 1: Disease
     pdf.cell(60, 10, "Disease Tested:", 1, 0, 'L', fill=True)
     pdf.set_font('helvetica', '', 12)
     pdf.cell(130, 10, str(analysis_data.get('disease', 'N/A')), 1, 
              new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     
-    # Row 2
+    # Row 2: Status
     pdf.set_font('helvetica', 'B', 12)
     pdf.cell(60, 10, "Result Status:", 1, 0, 'L', fill=True)
     pdf.set_font('helvetica', '', 12)
@@ -379,41 +379,44 @@ def generate_pdf_report(analysis_data, user_full_name, user_id):
     pdf.set_font('helvetica', 'B', 14)
     pdf.cell(0, 10, "Clinical Summary:", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font('helvetica', '', 11)
-    pdf.multi_cell(0, 8, "The AI analysis indicates the presence of characteristics associated with " + 
-                   str(analysis_data.get('disease', 'the selected condition')) + ". " +
-                   "Please correlate these findings with clinical observations.")
+    
+    summary_text = (
+        f"The AI analysis indicates the presence of characteristics associated with "
+        f"{analysis_data.get('disease', 'the selected condition')}. "
+        f"Please correlate these findings with clinical observations."
+    )
+    pdf.multi_cell(0, 8, summary_text)
 
-    # Return the PDF as bytes
+    # CRITICAL: In fpdf2, .output() without arguments returns a bytearray/bytes
     return pdf.output()
 
 def get_pdf_download_link(pdf_bytes, filename="Report.pdf"):
-    """Generates a link allowing the PDF to be downloaded"""
+    """Generates a base64 encoded link for downloading"""
+    # Ensure pdf_bytes is treated as bytes
     b64 = base64.b64encode(pdf_bytes).decode()
-    return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">Click here to download your Report</a>'
+    return f'<a href="data:application/pdf;base64,{b64}" download="{filename}" style="text-decoration:none;"><button style="padding:10px; border-radius:5px; background-color:#4CAF50; color:white; border:none; cursor:pointer;">Click here to download your Report</button></a>'
 
 # --- In your main UI section ---
 def show_report_ui(analysis_result, user_name, uid):
     st.subheader("Generate Clinical Report")
     
-    # Create the PDF in memory
     try:
+        # Create the PDF in memory
         report_bytes = generate_pdf_report(analysis_result, user_name, uid)
         
-        # Method 1: The standard Streamlit Download Button (Reliable)
+        # Method 1: The standard Streamlit Download Button (Recommended)
         st.download_button(
-            label="Download PDF Report",
+            label="📄 Download PDF Report",
             data=report_bytes,
             file_name=f"Pathoscope_Report_{uid}.pdf",
             mime="application/pdf"
         )
         
-        # Method 2: Fallback HTML Link (If button fails)
+        # Method 2: Fallback HTML Link
         st.markdown(get_pdf_download_link(report_bytes), unsafe_allow_html=True)
         
     except Exception as e:
         st.error(f"PDF System Error: {str(e)}")
-        st.info("The server is using a strict version of FPDF. Ensure 'new_x' and 'new_y' are used.")
-        
         
                 
 import streamlit as st
@@ -758,6 +761,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
