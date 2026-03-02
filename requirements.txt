@@ -6,3 +6,4 @@ pandas
 pillow
 fpdf2
 altair<5.0.0
+reportlab
