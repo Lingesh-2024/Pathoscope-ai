@@ -1,7 +1,8 @@
-mysql-connector-python
+pandas
 streamlit
 Pillow
 torch
 torchvision
 fpdf
 opencv-python-headless
+
