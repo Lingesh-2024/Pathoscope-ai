@@ -1,10 +1,3 @@
-import zipfile
-import os
-
-# Check if data is already unzipped; if not, unzip it
-if not os.path.exists('data'):
-    with zipfile.ZipFile('datasets.zip', 'r') as zip_ref:
-        zip_ref.extractall('.')
         
 import streamlit as st
 from PIL import Image
@@ -686,3 +679,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
