@@ -532,31 +532,40 @@ import time
 def page_history():
     """History page to view past diagnosis records with Voice Search."""
     st.title("📚 Diagnosis History")
-    st.info(f"Viewing history for: **{st.session_state.get('full_name', 'User')}**")
+    
+    user_name = st.session_state.get('full_name', 'User')
+    user_id = st.session_state.get('user_id')
+    
+    st.info(f"Viewing clinical history for: **{user_name}**")
 
-    # Guard against non-persistent sessions
-    if st.session_state.get('user_id') == 9999:
-        st.warning("History is not saved for anonymous users. Please log in with a registered account.")
+    # Guard against non-persistent sessions (like the 'anon' bypass if handled that way)
+    if user_id == 9999:
+        st.warning("History is not saved for temporary sessions. Please log in with a registered account to persist data.")
         return
 
-    # Fetch records from the database logic built in previous blocks
-    records = fetch_history(st.session_state['user_id']) if 'fetch_history' in globals() else []
+    # Fetch records from the database logic built in Block 2
+    # If the function doesn't exist (e.g., during testing), we return an empty list
+    records = fetch_history(user_id) if 'fetch_history' in globals() else []
 
     if not records:
-        st.warning("No diagnosis history found for this user. Records appear here after an analysis is completed.")
+        st.warning("No diagnosis history found. Records appear here after an analysis is completed and saved.")
         return
 
     # --- VOICE SEARCH UI ---
     st.subheader("Search Records")
-    col1, col2 = st.columns([4, 1])
+    col_search, col_voice = st.columns([4, 1])
     
-    with col1:
-        # The key "voice_search_input" is used by the JS to inject text
-        search_query = st.text_input("Enter patient name or disease", key="voice_search_input", placeholder="Type or use microphone...")
+    with col_search:
+        # The placeholder is the "hook" for the JavaScript voice injection
+        search_query = st.text_input(
+            "Filter by patient, disease, or result", 
+            key="voice_search_input", 
+            placeholder="Type or use microphone..."
+        )
     
-    with col2:
-        st.write(" ") # Visual spacer
-        # Speech-to-Text Bridge: Injects transcribed text directly into the Streamlit input DOM
+    with col_voice:
+        st.write(" ") # Alignment spacer
+        # Speech-to-Text Bridge: Injects transcribed text directly into the Streamlit input DOM via the parent window
         voice_js = """
         <script>
         function startDictation() {
@@ -571,7 +580,7 @@ def page_history():
                     var voiceText = e.results[0][0].transcript;
                     recognition.stop();
                     
-                    // Logic to find the Streamlit input field and simulate user input
+                    // Logic to find the Streamlit input field in the parent DOM
                     const inputs = window.parent.document.querySelectorAll('input[type="text"]');
                     let targetInput = null;
 
@@ -583,17 +592,16 @@ def page_history():
                     }
 
                     if (targetInput) {
+                        // Native value setter to bypass React's internal state block
                         const nativeValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
                         nativeValueSetter.call(targetInput, voiceText);
 
-                        // Trigger React/Streamlit change detection
+                        // Trigger change detection so Streamlit picks up the new value
                         const event = new Event('input', { bubbles: true });
                         targetInput.dispatchEvent(event);
                         
                         targetInput.focus();
-                        setTimeout(() => {
-                            targetInput.blur();
-                        }, 100);
+                        setTimeout(() => { targetInput.blur(); }, 100);
                     }
                 };
                 
@@ -606,17 +614,21 @@ def page_history():
             }
         }
         </script>
-        <button onclick="startDictation()" style="background-color: #ff4b4b; color: white; border: none; padding: 10px; border-radius: 8px; cursor: pointer; width: 100%; height: 45px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">
+        <button onclick="startDictation()" style="background-color: #ff4b4b; color: white; border: none; padding: 10px; border-radius: 8px; cursor: pointer; width: 100%; height: 45px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; transition: 0.3s;">
             🎤 Speak
         </button>
         """
-        components.html(voice_js, height=45)
+        components.html(voice_js, height=50)
 
     # --- DATA PROCESSING & FILTERING ---
     history_data = []
     for record in records:
+        # Standardize date formatting
+        diag_date = record['diagnosis_date']
+        date_str = diag_date.strftime('%Y-%m-%d %H:%M') if hasattr(diag_date, 'strftime') else str(diag_date)
+        
         history_data.append({
-            "Date": record['diagnosis_date'].strftime('%Y-%m-%d %H:%M') if hasattr(record['diagnosis_date'], 'strftime') else str(record['diagnosis_date']),
+            "Date": date_str,
             "Patient": record['patient_name'],
             "Sample": record['sample_type'],
             "Disease": record['disease_tested'],
@@ -626,15 +638,16 @@ def page_history():
     
     df = pd.DataFrame(history_data)
 
-    # Filter based on search bar (Real-time sync)
+    # Real-time search filtering
     if search_query:
+        search_query = search_query.lower()
         df = df[
-            df['Patient'].str.contains(search_query, case=False) | 
-            df['Disease'].str.contains(search_query, case=False) |
-            df['Result'].str.contains(search_query, case=False)
+            df['Patient'].str.lower().contains(search_query) | 
+            df['Disease'].str.lower().contains(search_query) |
+            df['Result'].str.lower().contains(search_query)
         ]
 
-    st.subheader(f"Results Found: {len(df)}")
+    st.subheader(f"History Log ({len(df)} records)")
     st.dataframe(
         df, 
         use_container_width=True,
@@ -642,51 +655,60 @@ def page_history():
     )
 
 def main():
-    """Main Application Entry Point."""
-    st.set_page_config(
-        page_title="Pathoscope AI",
-        page_icon="🔬",
-        layout="wide"
-    )
+    """Main Application Entry Point & Router."""
+    # Ensure set_page_config is the first Streamlit command called
+    try:
+        st.set_page_config(
+            page_title="Pathoscope AI",
+            page_icon="🔬",
+            layout="wide",
+            initial_sidebar_state="expanded"
+        )
+    except:
+        pass # Handle cases where this might be called twice during development
     
-    # Global state init
+    # Initialize Global Auth State
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
 
-    # Sidebar Navigation
-    st.sidebar.title("🔬 Pathoscope AI")
-    st.sidebar.caption("v1.2.0 | Next-Gen Diagnostics")
-    st.sidebar.markdown("---")
+    # --- Sidebar Navigation ---
+    st.sidebar.markdown("# 🔬 Pathoscope AI")
+    st.sidebar.caption("v1.2.0 | Precision Diagnostics")
+    st.sidebar.divider()
 
     if not st.session_state['logged_in']:
-        # If not logged in, show the login page (Block 5)
+        # If not authenticated, force Login Page (from Block 4)
         page_login()
     else:
-        # User is authenticated
-        st.sidebar.success(f"Logged in: {st.session_state['full_name']}")
+        # Sidebar Status & Navigation
+        st.sidebar.success(f"User: {st.session_state['full_name']}")
         
         app_page = st.sidebar.radio(
-            "Navigate",
-            ["Diagnosis", "History"],
+            "Navigate Application",
+            ["Diagnosis Portal", "Clinical History"],
+            index=0,
             key="main_nav_radio"
         )
         
-        st.sidebar.markdown("---")
+        st.sidebar.divider()
+        
+        # Logout Logic
         if st.sidebar.button("🔒 Secure Logout", use_container_width=True):
-            # Clear critical session keys
-            for key in ['logged_in', 'user_id', 'full_name', 'analysis_result']:
+            keys_to_clear = ['logged_in', 'user_id', 'full_name', 'analysis_result', 'uploaded_image', 'grad_cam_image']
+            for key in keys_to_clear:
                 if key in st.session_state:
                     del st.session_state[key]
             st.session_state['logged_in'] = False
             st.rerun()
 
-        # Page Router
-        if app_page == "Diagnosis":
-            page_diagnosis() # From Block 5
-        elif app_page == "History":
-            page_history()
+        st.sidebar.info("Support: help@pathoscope.ai")
+
+        # --- Router Execution ---
+        if app_page == "Diagnosis Portal":
+            page_diagnosis() # Defined in Block 4
+        elif app_page == "Clinical History":
+            page_history() # Defined in Block 5
 
 if __name__ == '__main__':
     main()
-
 
