@@ -1,7 +1,7 @@
 import streamlit as st
 from PIL import Image
 import time
-import hashlib 
+import hashlib
 import mysql.connector
 from ml_logic import (
     get_sample_options, 
@@ -14,25 +14,29 @@ from ml_logic import (
 import streamlit.components.v1 as components
 import pandas as pd 
 import io
-from fpdf import FPDF 
 import tempfile 
 import os 
+from datetime import datetime
+
+# Switched to ReportLab for cloud stability (replaces fpdf)
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # --- UPDATED CONFIGURATION (AIVEN CLOUD READY) ---
-# We now use Streamlit Secrets instead of hardcoding 'localhost'
 def get_db_connection():
     """Establishes a connection to the Aiven MySQL database using secrets."""
     try:
         conn = mysql.connector.connect(
             host=st.secrets["mysql"]["host"],
-            port=st.secrets["mysql"]["port"],
+            port=int(st.secrets["mysql"]["port"]),
             user=st.secrets["mysql"]["user"],
             password=st.secrets["mysql"]["password"],
             database=st.secrets["mysql"]["database"]
         )
         return conn
     except Exception as e:
-        # Display a warning if the DB connection fails
         st.warning(f"Database Connection Warning: {e}. Check your Streamlit Secrets.")
         return None
 
@@ -94,7 +98,6 @@ def save_user(username, password, full_name):
     
     try:
         cursor = conn.cursor()
-        # Check if username exists
         cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
         if cursor.fetchone():
             st.warning("Username already exists. Please choose a different one.")
@@ -117,7 +120,6 @@ def authenticate_user(username, password):
     """Authenticates a user and returns their ID and full name."""
     conn = get_db_connection()
     
-    # Fallback mechanism if database is offline
     if not conn: 
         if username == "admin" and password == "admin123":
             st.info("Emergency Login: Using offline admin credentials.")
@@ -125,7 +127,6 @@ def authenticate_user(username, password):
         return None, None
 
     try:
-        # Use dictionary=True so we can access columns by name (user['password_hash'])
         cursor = conn.cursor(dictionary=True)
         query = "SELECT id, password_hash, full_name FROM users WHERE username = %s"
         cursor.execute(query, (username,))
@@ -140,21 +141,17 @@ def authenticate_user(username, password):
     finally:
         if 'cursor' in locals():
             cursor.close()
-        conn.close()
-
+        if conn:
+            conn.close()
 
 def save_diagnosis(user_id, patient_name, sample_type, disease_tested, result_status, confidence_score, image_path="N/A"):
     """Saves a diagnosis record to the database."""
     conn = get_db_connection()
     if not conn:
-        # We return True here to avoid blocking the user experience if the DB is momentarily down
-        # In a production app, you might cache this locally instead.
         return True 
     
     try:
         cursor = conn.cursor()
-        # The schema assumes patient_history has: id, user_id, patient_name, sample_type, 
-        # disease_tested, result_status, confidence_score, image_path, and diagnosis_date.
         query = """
         INSERT INTO patient_history 
         (user_id, patient_name, sample_type, disease_tested, result_status, confidence_score, image_path) 
@@ -169,7 +166,8 @@ def save_diagnosis(user_id, patient_name, sample_type, disease_tested, result_st
     finally:
         if 'cursor' in locals():
             cursor.close()
-        conn.close()
+        if conn:
+            conn.close()
 
 def fetch_history(user_id):
     """Fetches all diagnosis records for the logged-in user."""
@@ -178,7 +176,6 @@ def fetch_history(user_id):
         return []
         
     try:
-        # Using dictionary=True makes it much easier to display records in a Streamlit table/dataframe
         cursor = conn.cursor(dictionary=True)
         query = """
         SELECT patient_name, sample_type, disease_tested, result_status, confidence_score, diagnosis_date 
@@ -195,144 +192,114 @@ def fetch_history(user_id):
     finally:
         if 'cursor' in locals():
             cursor.close()
-        conn.close()
-        
-import time
-import os
-import tempfile
-from fpdf import FPDF
-import streamlit as st
-from PIL import Image
-import io
+        if conn:
+            conn.close()
 
 def create_pdf_report(analysis_result, patient_name, sample_type, uploaded_image, grad_cam_image):
     """
-    Generates a medical diagnosis report. 
-    Handles conversion of Streamlit uploads to PIL images automatically.
+    Generates a medical diagnosis report using ReportLab.
     """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
     
-    # --- INTERNAL UTILITY TO ENSURE PIL IMAGE ---
-    def ensure_pil(img):
-        if img is None:
-            return None
-        # If it's a path or a Streamlit UploadedFile, open it
-        if not isinstance(img, Image.Image):
-            try:
-                return Image.open(img).convert("RGB")
-            except:
-                return None
-        return img.convert("RGB")
+    # Custom Styles
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], alignment=1, spaceAfter=12)
+    heading_style = ParagraphStyle('HeadingStyle', parent=styles['Heading2'], spaceBefore=10, spaceAfter=10)
+    normal_style = styles['Normal']
+    warning_style = ParagraphStyle('WarningStyle', parent=styles['Italic'], textColor=colors.red, fontSize=9)
 
-    # Pre-process images
-    proc_uploaded = ensure_pil(uploaded_image)
-    proc_gradcam = ensure_pil(grad_cam_image)
+    elements = []
 
-    class PDF(FPDF):
-        def header(self):
-            self.set_font('helvetica', 'B', 15)
-            self.cell(0, 10, 'Pathoscope AI Diagnosis Report', 0, 1, 'C')
-            self.line(10, 20, 200, 20)
-            self.ln(5)
-
-        def footer(self):
-            self.set_y(-15)
-            self.set_font('helvetica', 'I', 8)
-            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-    # Initialize PDF
-    pdf = PDF('P', 'mm', 'A4')
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    pdf.set_font('helvetica', '', 11)
+    # Header
+    elements.append(Paragraph("Pathoscope AI Diagnosis Report", title_style))
+    elements.append(Spacer(1, 12))
     
-    # Report Metadata
-    pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, f"Report Generated On: {time.strftime('%Y-%m-%d %H:%M:%S')}", 0, 1, 'L')
-    
-    # Safely handle session state
+    # Metadata
     full_name = st.session_state.get('full_name', 'N/A')
     user_id = st.session_state.get('user_id', 'N/A')
-    pdf.cell(0, 5, f"Analyst: {full_name} (ID: {user_id})", 0, 1, 'L')
-    pdf.ln(5)
-    
-    # 1. Patient Details
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font('helvetica', 'B', 14)
-    pdf.cell(0, 8, '1. Patient and Sample Details', 0, 1, 'L')
-    pdf.set_font('helvetica', '', 11)
-    
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(60, 7, 'Patient Name:', 1, 0, 'L', 1)
-    pdf.cell(130, 7, str(patient_name), 1, 1, 'L')
-    pdf.cell(60, 7, 'Sample Type:', 1, 0, 'L', 1)
-    pdf.cell(130, 7, str(sample_type), 1, 1, 'L')
-    pdf.cell(60, 7, 'Disease Tested:', 1, 0, 'L', 1)
-    pdf.cell(130, 7, str(analysis_result.get('disease', 'N/A')), 1, 1, 'L')
-    pdf.ln(5)
+    elements.append(Paragraph(f"Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", normal_style))
+    elements.append(Paragraph(f"Analyst: {full_name} (ID: {user_id})", normal_style))
+    elements.append(Spacer(1, 12))
+
+    # 1. Patient Details Table
+    elements.append(Paragraph("1. Patient and Sample Details", heading_style))
+    data = [
+        ["Patient Name:", str(patient_name)],
+        ["Sample Type:", str(sample_type)],
+        ["Disease Tested:", str(analysis_result.get('disease', 'N/A'))]
+    ]
+    t = Table(data, colWidths=[150, 300])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.whitesmoke),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('PADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 12))
 
     # 2. Diagnosis Result
-    pdf.set_font('helvetica', 'B', 14)
-    pdf.cell(0, 8, '2. Diagnosis Result', 0, 1, 'L')
-    
+    elements.append(Paragraph("2. Diagnosis Result", heading_style))
     status_str = str(analysis_result.get('result_status', 'N/A')).upper()
     danger_keywords = ['POSITIVE', 'MALIGNANT', 'PARASITIZED', 'PNEUMONIA']
-    result_color = (200, 0, 0) if any(kw in status_str for kw in danger_keywords) else (0, 120, 0)
+    res_color = colors.red if any(kw in status_str for kw in danger_keywords) else colors.green
     
-    pdf.set_fill_color(240, 240, 240)
-    pdf.set_font('helvetica', '', 11)
-    pdf.cell(60, 7, 'Result Status:', 1, 0, 'L', 1)
-    pdf.set_text_color(*result_color)
-    pdf.set_font('helvetica', 'B', 12)
-    pdf.cell(130, 7, status_str, 1, 1, 'L')
-    
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font('helvetica', '', 11)
-    pdf.cell(60, 7, 'Confidence Score:', 1, 0, 'L', 1)
-    pdf.cell(130, 7, f"{analysis_result.get('percentage', 0):.2f}%", 1, 1, 'L')
-    pdf.ln(8)
+    res_data = [
+        ["Result Status:", status_str],
+        ["Confidence Score:", f"{analysis_result.get('percentage', 0):.2f}%"]
+    ]
+    rt = Table(res_data, colWidths=[150, 300])
+    rt.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.whitesmoke),
+        ('TEXTCOLOR', (1, 0), (1, 0), res_color),
+        ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+    ]))
+    elements.append(rt)
+    elements.append(Spacer(1, 12))
 
     # 3. Images
-    def add_img(pdf_doc, img, title):
-        if img is None: return
-        pdf_doc.set_font('helvetica', 'B', 11)
-        pdf_doc.cell(0, 7, title, 0, 1, 'L')
-        
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            img.save(tmp.name, format="PNG")
-            tmp_path = tmp.name
-        
-        try:
-            # Automatic page break if image won't fit
-            if pdf_doc.get_y() > 180:
-                pdf_doc.add_page()
-            pdf_doc.image(tmp_path, x=40, w=120)
-            pdf_doc.ln(5)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-    add_img(pdf, proc_uploaded, 'A. Original Sample')
-    add_img(pdf, proc_gradcam, 'B. AI Heatmap Analysis')
+    elements.append(Paragraph("3. Visual Analysis", heading_style))
     
-    # 4. Disclaimer
-    pdf.ln(5)
-    pdf.set_font('helvetica', 'B', 12)
-    pdf.cell(0, 8, '4. Disclaimer', 0, 1, 'L')
-    pdf.set_font('helvetica', 'I', 9)
-    pdf.set_text_color(150, 0, 0)
-    pdf.multi_cell(0, 5, "Experimental AI report. Not for final clinical diagnosis. Consult a professional.")
+    from reportlab.platypus import Image as RLImage
+    
+    def process_img_for_pdf(img):
+        if img is None: return None
+        if not isinstance(img, Image.Image):
+            img = Image.open(img)
+        img = img.convert("RGB")
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        img.save(tmp.name, format="PNG")
+        return tmp.name
 
-    # --- RETURN AS BYTES ---
-    # Most reliable way to handle string vs bytes in FPDF
-    try:
-        raw_output = pdf.output(dest='S')
-        if isinstance(raw_output, str):
-            return raw_output.encode('latin-1')
-        return raw_output
-    except Exception as e:
-        # If this fails, the error will be visible in the streamlit console
-        print(f"PDF FINAL ERROR: {e}")
-        raise e
+    orig_path = process_img_for_pdf(uploaded_image)
+    grad_path = process_img_for_pdf(grad_cam_image)
+
+    if orig_path:
+        elements.append(Paragraph("A. Original Sample", styles['Normal']))
+        elements.append(RLImage(orig_path, width=300, height=200))
+        elements.append(Spacer(1, 12))
+    
+    if grad_path:
+        elements.append(Paragraph("B. AI Heatmap Analysis", styles['Normal']))
+        elements.append(RLImage(grad_path, width=300, height=200))
+        elements.append(Spacer(1, 12))
+
+    # 4. Disclaimer
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph("4. Disclaimer", heading_style))
+    elements.append(Paragraph("Experimental AI report. Not for final clinical diagnosis. Consult a professional medical practitioner.", warning_style))
+
+    # Build PDF
+    doc.build(elements)
+    
+    # Cleanup temp files
+    for p in [orig_path, grad_path]:
+        if p and os.path.exists(p): os.remove(p)
+        
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
         
 import streamlit as st
 import io
@@ -351,9 +318,14 @@ def generate_reportlab_pdf(analysis_data, user_full_name, user_id):
     buffer = io.BytesIO()
     
     # Create the document template
-    doc = SimpleDocTemplate(buffer, pagesize=letter, 
-                            rightMargin=50, leftMargin=50, 
-                            topMargin=50, bottomMargin=50)
+    doc = SimpleDocTemplate(
+        buffer, 
+        pagesize=letter, 
+        rightMargin=50, 
+        leftMargin=50, 
+        topMargin=50, 
+        bottomMargin=50
+    )
     
     elements = []
     styles = getSampleStyleSheet()
@@ -385,13 +357,18 @@ def generate_reportlab_pdf(analysis_data, user_full_name, user_id):
     elements.append(Spacer(1, 20))
     
     # --- 3. Patient & Result Table ---
-    # Construct data for the table
+    # Determine color based on result status
+    status_str = str(analysis_data.get('result_status', '')).upper()
+    danger_keywords = ['POSITIVE', 'MALIGNANT', 'PARASITIZED', 'PNEUMONIA']
+    is_danger = any(kw in status_str for kw in danger_keywords)
+    result_text_color = colors.red if is_danger else colors.green
+
     table_data = [
         [Paragraph("<b>PARAMETER</b>", styles['Normal']), Paragraph("<b>CLINICAL VALUE</b>", styles['Normal'])],
         ["Patient Name", str(analysis_data.get('patient_name', 'N/A'))],
         ["Sample Type", str(analysis_data.get('sample_type', 'N/A'))],
         ["Disease Tested", str(analysis_data.get('disease', 'N/A'))],
-        ["Result Status", str(analysis_data.get('result_status', 'N/A')).upper()],
+        ["Result Status", status_str],
         ["Confidence Score", f"{analysis_data.get('percentage', 0):.2f}%"]
     ]
     
@@ -402,16 +379,19 @@ def generate_reportlab_pdf(analysis_data, user_full_name, user_id):
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
         ('PADDING', (0, 0), (-1, -1), 10),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('TEXTCOLOR', (0, 4), (1, 4), colors.red if "POSITIVE" in str(analysis_data.get('result_status', '')).upper() else colors.green),
+        # Set the color for the "Result Status" value cell specifically
+        ('TEXTCOLOR', (1, 4), (1, 4), result_text_color),
+        ('FONTNAME', (1, 4), (1, 4), 'Helvetica-Bold'),
     ]))
     elements.append(t)
     elements.append(Spacer(1, 30))
     
     # --- 4. Clinical Summary ---
     elements.append(Paragraph("<b>4. Clinical Summary</b>", styles['Heading2']))
+    disease_name = analysis_data.get('disease', 'the target condition')
     summary_text = (
         f"The AI analysis has identified markers consistent with "
-        f"<b>{analysis_data.get('disease', 'the target condition')}</b>. "
+        f"<b>{disease_name}</b>. "
         "These findings are based on digital image processing and should be correlated "
         "with patient history, clinical symptoms, and secondary diagnostic tests."
     )
@@ -436,40 +416,47 @@ def generate_reportlab_pdf(analysis_data, user_full_name, user_id):
     buffer.close()
     return pdf_bytes
 
-# --- 6. Helper for HTML Download Link (Fallback) ---
 def get_reportlab_download_link(pdf_bytes, filename="Pathoscope_Report.pdf"):
+    """Creates a base64 encoded download link for the PDF."""
     b64 = base64.b64encode(pdf_bytes).decode()
     return f'''
         <a href="data:application/pdf;base64,{b64}" download="{filename}" style="text-decoration:none;">
-            <button style="background-color:#007BFF; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer;">
-                Download PDF Report
+            <button style="background-color:#007BFF; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">
+                Download PDF Report (Link)
             </button>
         </a>
     '''
 
-# --- 7. Integration in Main App ---
 def show_clinical_report_ui(results, name, uid):
+    """Main UI component to generate and download the report."""
     st.write("---")
-    st.header("Report Generation")
+    st.subheader("📋 Digital Lab Report")
     
-    try:
-        # Pass your result dictionary and user info
-        pdf_content = generate_reportlab_pdf(results, name, uid)
-        
-        # Method 1: The standard Streamlit Download Button
-        st.download_button(
-            label="📄 Download PDF Report",
-            data=pdf_content,
-            file_name=f"Report_{name.replace(' ', '_')}.pdf",
-            mime="application/pdf",
-            key="reportlab_download"
-        )
-        
-        # Method 2: HTML Fallback Link (Visible if you want a second option)
-        st.markdown(get_reportlab_download_link(pdf_content), unsafe_allow_html=True)
-        
-    except Exception as e:
-        st.error(f"Failed to generate Report: {str(e)}")
+    with st.spinner("Generating clinical report..."):
+        try:
+            # Ensure patient name is included in results for the PDF function
+            results['patient_name'] = name
+            
+            pdf_content = generate_reportlab_pdf(results, st.session_state.get('full_name', 'Analyst'), uid)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.info("Your report is ready for download.")
+                st.download_button(
+                    label="📄 Download PDF Report",
+                    data=pdf_content,
+                    file_name=f"Report_{name.replace(' ', '_')}.pdf",
+                    mime="application/pdf",
+                    key="reportlab_download_btn"
+                )
+            
+            with col2:
+                st.write("Browser Fallback:")
+                st.markdown(get_reportlab_download_link(pdf_content), unsafe_allow_html=True)
+                
+        except Exception as e:
+            st.error(f"Failed to generate Report: {str(e)}")
         
                 
 import streamlit as st
@@ -478,177 +465,150 @@ from PIL import Image
 
 def page_login():
     """Handles user login and signup flow with DNA branding."""
-    st.image(
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/DNA_sequence_by_Sanger_method.png/440px-DNA_sequence_by_Sanger_method.png",
-        width=100
-    )
-    st.header("Pathoscope AI Login")
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_logo, col_text = st.columns([1, 4])
+    with col_logo:
+        st.image(
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/DNA_sequence_by_Sanger_method.png/440px-DNA_sequence_by_Sanger_method.png",
+            width=80
+        )
+    with col_text:
+        st.title("Pathoscope AI")
+        st.caption("Next-Generation Digital Pathology & Diagnostic Assistant")
 
     st.info("Log in with custom credentials or use **Username: anon / Password: anon** to bypass the database check.")
 
-    choice = st.selectbox("Action", ["Login", "Sign Up"], key="auth_choice")
+    choice = st.radio("Access Portal", ["Login", "Sign Up"], horizontal=True, label_visibility="collapsed")
 
     if choice == "Login":
         with st.form("login_form"):
-            st.markdown("#### User Login")
+            st.markdown("### 🔐 User Login")
             username = st.text_input("Username", key="login_user")
             password = st.text_input("Password", type="password", key="login_pass")
-            submitted = st.form_submit_button("Login", use_container_width=True)
+            submitted = st.form_submit_button("Authenticate", use_container_width=True)
             
             if submitted:
-                with st.spinner("Authenticating..."):
-                    # This calls the auth function from your logic block
-                    user_id, full_name = authenticate_user(username, password)
-                    if user_id:
-                        st.session_state['logged_in'] = True
-                        st.session_state['user_id'] = user_id
-                        st.session_state['full_name'] = full_name
-                        st.success(f"Welcome back, {full_name}!")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("Invalid Username or Password.")
+                if not username or not password:
+                    st.warning("Please enter both username and password.")
+                else:
+                    with st.spinner("Authenticating..."):
+                        # References Block 2's authenticate_user
+                        user_id, full_name = authenticate_user(username, password)
+                        if user_id:
+                            st.session_state['logged_in'] = True
+                            st.session_state['user_id'] = user_id
+                            st.session_state['full_name'] = full_name
+                            st.success(f"Welcome back, {full_name}!")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error("Invalid Username or Password.")
 
     elif choice == "Sign Up":
         with st.form("signup_form"):
-            st.markdown("#### New User Registration")
-            new_full_name = st.text_input("Full Name", key="signup_name")
-            new_username = st.text_input("New Username", key="signup_user")
-            new_password = st.text_input("New Password", type="password", key="signup_pass")
-            submitted = st.form_submit_button("Sign Up", use_container_width=True)
+            st.markdown("### 📝 New Registration")
+            new_full_name = st.text_input("Full Name (e.g., Dr. John Doe)", key="signup_name")
+            new_username = st.text_input("Choose Username", key="signup_user")
+            new_password = st.text_input("Choose Password", type="password", key="signup_pass")
+            submitted = st.form_submit_button("Register Account", use_container_width=True)
             
             if submitted:
                 if new_username and new_password and new_full_name:
-                    if len(new_password) < 6:
-                        st.warning("Password must be at least 6 characters.")
+                    if len(new_password) < 4:
+                        st.warning("Password is too short.")
                     else:
                         with st.spinner("Creating account..."):
+                            # References Block 2's save_user
                             save_user(new_username, new_password, new_full_name)
-                            st.success("Account created! Please switch to Login.")
+                            st.success("Account created! You can now switch to Login.")
                 else:
                     st.warning("Please fill in all fields.")
 
 def page_diagnosis():
     """Main Diagnosis page for image upload, AI analysis, and report generation."""
-    st.image(
-        "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/DNA_sequence_by_Sanger_method.png/440px-DNA_sequence_by_Sanger_method.png",
-        width=100
-    )
-    st.title("Smart Microscope Diagnosis System")
-    st.markdown("Analyze microscope images to detect diseases and visualize infected regions using deep learning.")
+    st.title("🔬 Smart Microscope Diagnosis")
+    st.markdown("Upload or capture microscope imagery to detect anomalies using Deep Learning.")
 
-    # Show model architecture details
-    if 'display_training_structure' in globals():
-        display_training_structure()
+    # 1. Patient Details
+    with st.expander("👤 Patient & Sample Information", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            patient_name = st.text_input("Patient Full Name:", key="patient_name_input")
+        with col2:
+            # Fallback for sample options if Block 1 helper isn't available
+            sample_options = ["Blood Smear (Malaria)", "Tissue Biopsy (Cancer)", "Chest X-Ray (Pneumonia)"]
+            sample_type = st.selectbox("Sample Source", sample_options, key="sample_type_select")
     
-    # Section: Patient Details
-    st.subheader("Patient & Sample Details")
-    col1, col2 = st.columns(2)
-    with col1:
-        patient_name = st.text_input("Patient Name:", key="patient_name_input", value=st.session_state.get('full_name', ''))
-    with col2:
-        sample_type = st.selectbox(
-            "Sample Type",
-            get_sample_options() if 'get_sample_options' in globals() else ["Blood Smear", "Tissue Biopsy", "Cell Culture"],
-            key="sample_type_select"
-        )
-    
-    # Determine the disease category
-    disease_tested = get_disease_from_sample(sample_type) if 'get_disease_from_sample' in globals() else "Unknown"
+    # Logic from Block 1/2 to determine disease
+    disease_tested = sample_type.split('(')[-1].strip(')') if '(' in sample_type else "General"
 
-    # Load AI Model (Internal logic handles real vs mock)
-    model = load_model_real(disease_tested) if 'load_model_real' in globals() else None
-
-    # Section: Image Input
-    st.subheader("Choose Image Source")
-    input_method = st.radio(
-        "Select Input Method:",
-        ("Upload Image from Device", "Capture Live via Microscope/Camera"),
-        key="input_method_radio",
-        horizontal=True
-    )
+    # 2. Image Input
+    st.subheader("📸 Image Acquisition")
+    input_method = st.tabs(["📁 File Upload", "📷 Live Camera"])
     
     uploaded_file = None
-    if input_method == "Upload Image from Device":
-        uploaded_file = st.file_uploader("Upload microscope image (PNG, JPG, JPEG)", type=["png", "jpg", "jpeg"])
+    with input_method[0]:
+        uploaded_file = st.file_uploader("Select Microscope Image", type=["png", "jpg", "jpeg"])
+    with input_method[1]:
+        camera_file = st.camera_input("Microscope Camera Feed")
+        if camera_file:
+            uploaded_file = camera_file
+        
+    # 3. Execution
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Current View", use_container_width=True)
+        
+        analyze_button = st.button("🚀 Analyze Sample", use_container_width=True, type="primary")
+        
+        if analyze_button:
+            if not patient_name:
+                st.warning("Please enter a patient name before analyzing.")
+            else:
+                with st.spinner(f"Processing {disease_tested} analysis..."):
+                    # References Block 2's get_prediction logic
+                    # We pass the sample type to handle mock vs real data correctly
+                    results = get_prediction(image, sample_type)
+                    
+                    st.divider()
+                    st.header("Results Summary")
+                    
+                    res_col1, res_col2 = st.columns(2)
+                    status = results['result_status']
+                    conf = results['percentage']
+                    
+                    with res_col1:
+                        # Visual indicators for results
+                        is_danger = any(kw in status.upper() for kw in ['POSITIVE', 'MALIGNANT', 'PNEUMONIA'])
+                        if is_danger:
+                            st.error(f"**FINDING:** {status}")
+                        else:
+                            st.success(f"**FINDING:** {status}")
+                        st.metric("Confidence Score", f"{conf:.2f}%")
+                    
+                    with res_col2:
+                        st.write("**Explainability Heatmap (Grad-CAM)**")
+                        # Show the Grad-CAM image returned by Block 2
+                        st.image(results['grad_cam_image'], use_container_width=True)
+
+                    # 4. Report Generation (Block 3 Integration)
+                    # We pass the data to the UI helper from Block 3
+                    if 'show_clinical_report_ui' in globals():
+                        show_clinical_report_ui(results, patient_name, st.session_state.get('user_id', 'UID-000'))
+                    
+                    # 5. Save to History (Block 2 Integration)
+                    if 'save_diagnosis' in globals():
+                        save_diagnosis(
+                            st.session_state['user_id'],
+                            patient_name,
+                            sample_type,
+                            disease_tested,
+                            status,
+                            results['confidence_decimal']
+                        )
     else:
-        uploaded_file = st.camera_input("Take Picture (Microscope View)")
-        
-    st.markdown("---")
-    
-    # Analysis Trigger
-    analyze_button = st.button("🔬 Start AI Analysis", use_container_width=True, disabled=(uploaded_file is None or not patient_name))
-    
-    if analyze_button and uploaded_file is not None:
-        try:
-            image = Image.open(uploaded_file)
-            st.image(image, caption="Current Sample View", use_container_width=True)
-            
-            # Cache inputs for report
-            st.session_state['uploaded_image'] = image
-            st.session_state['patient_name_report'] = patient_name
-            st.session_state['sample_type_report'] = sample_type
-            
-            with st.spinner(f"Running Inference for {disease_tested}..."):
-                # Perform prediction
-                analysis_result = get_real_prediction(model, image, disease_tested)
-                st.session_state['analysis_result'] = analysis_result
-                
-                # UI Results Display
-                st.header("Diagnosis Result")
-                status = analysis_result['result_status']
-                confidence = analysis_result['percentage']
-                
-                # Check for positive/negative keywords to colorize
-                danger_words = ['POSITIVE', 'MALIGNANT', 'PARASITIZED']
-                if any(w in status.upper() for w in danger_words):
-                    st.error(f"Status: **{status}** (Confidence: {confidence:.2f}%)")
-                else:
-                    st.success(f"Status: **{status}** (Confidence: {confidence:.2f}%)")
+        st.info("Waiting for image input to begin analysis.")
 
-                # Show Explainability Map
-                st.subheader("Explainability: Grad-CAM Visualization")
-                grad_cam_img = analysis_result['grad_cam_image']
-                st.image(grad_cam_img, caption="Activation Map (Affected Areas in Red/Yellow)", use_container_width=True)
-                st.session_state['grad_cam_image'] = grad_cam_img
-                
-                # Persist to history
-                save_diagnosis(
-                    st.session_state['user_id'],
-                    patient_name,
-                    sample_type,
-                    disease_tested,
-                    status,
-                    analysis_result['confidence_decimal'],
-                    image_path="internal_storage"
-                )
-        except Exception as e:
-            st.error(f"Processing Error: {e}")
-
-    # Section: Report Generation
-    if 'analysis_result' in st.session_state:
-        st.markdown("---")
-        st.subheader("Generate Clinical Report")
-        
-        try:
-            # Call our PDF generation tool
-            pdf_data = create_pdf_report(
-                st.session_state['analysis_result'],
-                st.session_state.get('patient_name_report', 'N/A'),
-                st.session_state.get('sample_type_report', 'N/A'),
-                st.session_state.get('uploaded_image'),
-                st.session_state.get('grad_cam_image')
-            )
-            
-            st.download_button(
-                label="⬇️ Download PDF Report",
-                data=pdf_data,
-                file_name=f"Pathoscope_{patient_name}_{int(time.time())}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-        except Exception as e:
-            st.warning("PDF Generation is currently unavailable in this environment.")
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -658,31 +618,40 @@ import time
 def page_history():
     """History page to view past diagnosis records with Voice Search."""
     st.title("📚 Diagnosis History")
-    st.info(f"Viewing history for: **{st.session_state.get('full_name', 'User')}**")
+    
+    user_name = st.session_state.get('full_name', 'User')
+    user_id = st.session_state.get('user_id')
+    
+    st.info(f"Viewing clinical history for: **{user_name}**")
 
-    # Guard against non-persistent sessions
-    if st.session_state.get('user_id') == 9999:
-        st.warning("History is not saved for anonymous users. Please log in with a registered account.")
+    # Guard against non-persistent sessions (like the 'anon' bypass if handled that way)
+    if user_id == 9999:
+        st.warning("History is not saved for temporary sessions. Please log in with a registered account to persist data.")
         return
 
-    # Fetch records from the database logic built in previous blocks
-    records = fetch_history(st.session_state['user_id']) if 'fetch_history' in globals() else []
+    # Fetch records from the database logic built in Block 2
+    # If the function doesn't exist (e.g., during testing), we return an empty list
+    records = fetch_history(user_id) if 'fetch_history' in globals() else []
 
     if not records:
-        st.warning("No diagnosis history found for this user. Records appear here after an analysis is completed.")
+        st.warning("No diagnosis history found. Records appear here after an analysis is completed and saved.")
         return
 
     # --- VOICE SEARCH UI ---
     st.subheader("Search Records")
-    col1, col2 = st.columns([4, 1])
+    col_search, col_voice = st.columns([4, 1])
     
-    with col1:
-        # The key "voice_search_input" is used by the JS to inject text
-        search_query = st.text_input("Enter patient name or disease", key="voice_search_input", placeholder="Type or use microphone...")
+    with col_search:
+        # The placeholder is the "hook" for the JavaScript voice injection
+        search_query = st.text_input(
+            "Filter by patient, disease, or result", 
+            key="voice_search_input", 
+            placeholder="Type or use microphone..."
+        )
     
-    with col2:
-        st.write(" ") # Visual spacer
-        # Speech-to-Text Bridge: Injects transcribed text directly into the Streamlit input DOM
+    with col_voice:
+        st.write(" ") # Alignment spacer
+        # Speech-to-Text Bridge: Injects transcribed text directly into the Streamlit input DOM via the parent window
         voice_js = """
         <script>
         function startDictation() {
@@ -697,7 +666,7 @@ def page_history():
                     var voiceText = e.results[0][0].transcript;
                     recognition.stop();
                     
-                    // Logic to find the Streamlit input field and simulate user input
+                    // Logic to find the Streamlit input field in the parent DOM
                     const inputs = window.parent.document.querySelectorAll('input[type="text"]');
                     let targetInput = null;
 
@@ -709,17 +678,16 @@ def page_history():
                     }
 
                     if (targetInput) {
+                        // Native value setter to bypass React's internal state block
                         const nativeValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
                         nativeValueSetter.call(targetInput, voiceText);
 
-                        // Trigger React/Streamlit change detection
+                        // Trigger change detection so Streamlit picks up the new value
                         const event = new Event('input', { bubbles: true });
                         targetInput.dispatchEvent(event);
                         
                         targetInput.focus();
-                        setTimeout(() => {
-                            targetInput.blur();
-                        }, 100);
+                        setTimeout(() => { targetInput.blur(); }, 100);
                     }
                 };
                 
@@ -732,17 +700,21 @@ def page_history():
             }
         }
         </script>
-        <button onclick="startDictation()" style="background-color: #ff4b4b; color: white; border: none; padding: 10px; border-radius: 8px; cursor: pointer; width: 100%; height: 45px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px;">
+        <button onclick="startDictation()" style="background-color: #ff4b4b; color: white; border: none; padding: 10px; border-radius: 8px; cursor: pointer; width: 100%; height: 45px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; transition: 0.3s;">
             🎤 Speak
         </button>
         """
-        components.html(voice_js, height=45)
+        components.html(voice_js, height=50)
 
     # --- DATA PROCESSING & FILTERING ---
     history_data = []
     for record in records:
+        # Standardize date formatting
+        diag_date = record['diagnosis_date']
+        date_str = diag_date.strftime('%Y-%m-%d %H:%M') if hasattr(diag_date, 'strftime') else str(diag_date)
+        
         history_data.append({
-            "Date": record['diagnosis_date'].strftime('%Y-%m-%d %H:%M') if hasattr(record['diagnosis_date'], 'strftime') else str(record['diagnosis_date']),
+            "Date": date_str,
             "Patient": record['patient_name'],
             "Sample": record['sample_type'],
             "Disease": record['disease_tested'],
@@ -752,15 +724,16 @@ def page_history():
     
     df = pd.DataFrame(history_data)
 
-    # Filter based on search bar (Real-time sync)
+    # Real-time search filtering
     if search_query:
+        search_query = search_query.lower()
         df = df[
-            df['Patient'].str.contains(search_query, case=False) | 
-            df['Disease'].str.contains(search_query, case=False) |
-            df['Result'].str.contains(search_query, case=False)
+            df['Patient'].str.lower().contains(search_query) | 
+            df['Disease'].str.lower().contains(search_query) |
+            df['Result'].str.lower().contains(search_query)
         ]
 
-    st.subheader(f"Results Found: {len(df)}")
+    st.subheader(f"History Log ({len(df)} records)")
     st.dataframe(
         df, 
         use_container_width=True,
@@ -768,58 +741,59 @@ def page_history():
     )
 
 def main():
-    """Main Application Entry Point."""
-    st.set_page_config(
-        page_title="Pathoscope AI",
-        page_icon="🔬",
-        layout="wide"
-    )
+    """Main Application Entry Point & Router."""
+    # Ensure set_page_config is the first Streamlit command called
+    try:
+        st.set_page_config(
+            page_title="Pathoscope AI",
+            page_icon="🔬",
+            layout="wide",
+            initial_sidebar_state="expanded"
+        )
+    except:
+        pass # Handle cases where this might be called twice during development
     
-    # Global state init
+    # Initialize Global Auth State
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
 
-    # Sidebar Navigation
-    st.sidebar.title("🔬 Pathoscope AI")
-    st.sidebar.caption("v1.2.0 | Next-Gen Diagnostics")
-    st.sidebar.markdown("---")
+    # --- Sidebar Navigation ---
+    st.sidebar.markdown("# 🔬 Pathoscope AI")
+    st.sidebar.caption("v1.2.0 | Precision Diagnostics")
+    st.sidebar.divider()
 
     if not st.session_state['logged_in']:
-        # If not logged in, show the login page (Block 5)
+        # If not authenticated, force Login Page (from Block 4)
         page_login()
     else:
-        # User is authenticated
-        st.sidebar.success(f"Logged in: {st.session_state['full_name']}")
+        # Sidebar Status & Navigation
+        st.sidebar.success(f"User: {st.session_state['full_name']}")
         
         app_page = st.sidebar.radio(
-            "Navigate",
-            ["Diagnosis", "History"],
+            "Navigate Application",
+            ["Diagnosis Portal", "Clinical History"],
+            index=0,
             key="main_nav_radio"
         )
         
-        st.sidebar.markdown("---")
+        st.sidebar.divider()
+        
+        # Logout Logic
         if st.sidebar.button("🔒 Secure Logout", use_container_width=True):
-            # Clear critical session keys
-            for key in ['logged_in', 'user_id', 'full_name', 'analysis_result']:
+            keys_to_clear = ['logged_in', 'user_id', 'full_name', 'analysis_result', 'uploaded_image', 'grad_cam_image']
+            for key in keys_to_clear:
                 if key in st.session_state:
                     del st.session_state[key]
             st.session_state['logged_in'] = False
             st.rerun()
 
-        # Page Router
-        if app_page == "Diagnosis":
-            page_diagnosis() # From Block 5
-        elif app_page == "History":
-            page_history()
+        st.sidebar.info("Support: help@pathoscope.ai")
+
+        # --- Router Execution ---
+        if app_page == "Diagnosis Portal":
+            page_diagnosis() # Defined in Block 4
+        elif app_page == "Clinical History":
+            page_history() # Defined in Block 5
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
