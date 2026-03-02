@@ -200,63 +200,67 @@ def fetch_history(user_id):
 import time
 import os
 import tempfile
-import io
 from fpdf import FPDF
 import streamlit as st
+from PIL import Image
+import io
 
 def create_pdf_report(analysis_result, patient_name, sample_type, uploaded_image, grad_cam_image):
     """
-    Generates a detailed medical diagnosis report in PDF format.
-    Refactored for maximum compatibility with Streamlit Cloud and FPDF/FPDF2.
+    Generates a medical diagnosis report. 
+    Handles conversion of Streamlit uploads to PIL images automatically.
     """
     
+    # --- INTERNAL UTILITY TO ENSURE PIL IMAGE ---
+    def ensure_pil(img):
+        if img is None:
+            return None
+        # If it's a path or a Streamlit UploadedFile, open it
+        if not isinstance(img, Image.Image):
+            try:
+                return Image.open(img).convert("RGB")
+            except:
+                return None
+        return img.convert("RGB")
+
+    # Pre-process images
+    proc_uploaded = ensure_pil(uploaded_image)
+    proc_gradcam = ensure_pil(grad_cam_image)
+
     class PDF(FPDF):
         def header(self):
-            # Header with branding
-            try:
-                self.set_font('Arial', 'B', 15)
-            except:
-                self.set_font('helvetica', 'B', 15) # Fallback if Arial isn't mapped
+            self.set_font('helvetica', 'B', 15)
             self.cell(0, 10, 'Pathoscope AI Diagnosis Report', 0, 1, 'C')
             self.line(10, 20, 200, 20)
             self.ln(5)
 
         def footer(self):
             self.set_y(-15)
-            try:
-                self.set_font('Arial', 'I', 8)
-            except:
-                self.set_font('helvetica', 'I', 8)
+            self.set_font('helvetica', 'I', 8)
             self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
     # Initialize PDF
-    # We use 'latin-1' as standard for FPDF
     pdf = PDF('P', 'mm', 'A4')
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    
-    try:
-        pdf.set_font('Arial', '', 11)
-    except:
-        pdf.set_font('helvetica', '', 11)
+    pdf.set_font('helvetica', '', 11)
     
     # Report Metadata
-    pdf.set_text_color(100, 100, 100) # Gray
+    pdf.set_text_color(100, 100, 100)
     pdf.cell(0, 5, f"Report Generated On: {time.strftime('%Y-%m-%d %H:%M:%S')}", 0, 1, 'L')
     
-    # Safely get session state info
+    # Safely handle session state
     full_name = st.session_state.get('full_name', 'N/A')
     user_id = st.session_state.get('user_id', 'N/A')
     pdf.cell(0, 5, f"Analyst: {full_name} (ID: {user_id})", 0, 1, 'L')
     pdf.ln(5)
     
-    # 1. Patient and Sample Details
-    pdf.set_text_color(0, 0, 0) # Black
-    pdf.set_font(pdf.font_family, 'B', 14)
+    # 1. Patient Details
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font('helvetica', 'B', 14)
     pdf.cell(0, 8, '1. Patient and Sample Details', 0, 1, 'L')
-    pdf.set_font(pdf.font_family, '', 11)
+    pdf.set_font('helvetica', '', 11)
     
-    # Detail Table
     pdf.set_fill_color(240, 240, 240)
     pdf.cell(60, 7, 'Patient Name:', 1, 0, 'L', 1)
     pdf.cell(130, 7, str(patient_name), 1, 1, 'L')
@@ -267,84 +271,68 @@ def create_pdf_report(analysis_result, patient_name, sample_type, uploaded_image
     pdf.ln(5)
 
     # 2. Diagnosis Result
-    pdf.set_font(pdf.font_family, 'B', 14)
+    pdf.set_font('helvetica', 'B', 14)
     pdf.cell(0, 8, '2. Diagnosis Result', 0, 1, 'L')
-    pdf.set_font(pdf.font_family, '', 11)
-
-    # Determine status color
+    
     status_str = str(analysis_result.get('result_status', 'N/A')).upper()
-    danger_keywords = ['POSITIVE', 'MALIGNANT', 'PARASITIZED']
+    danger_keywords = ['POSITIVE', 'MALIGNANT', 'PARASITIZED', 'PNEUMONIA']
     result_color = (200, 0, 0) if any(kw in status_str for kw in danger_keywords) else (0, 120, 0)
     
     pdf.set_fill_color(240, 240, 240)
+    pdf.set_font('helvetica', '', 11)
     pdf.cell(60, 7, 'Result Status:', 1, 0, 'L', 1)
     pdf.set_text_color(*result_color)
-    pdf.set_font(pdf.font_family, 'B', 12)
+    pdf.set_font('helvetica', 'B', 12)
     pdf.cell(130, 7, status_str, 1, 1, 'L')
     
     pdf.set_text_color(0, 0, 0)
-    pdf.set_font(pdf.font_family, '', 11)
+    pdf.set_font('helvetica', '', 11)
     pdf.cell(60, 7, 'Confidence Score:', 1, 0, 'L', 1)
     pdf.cell(130, 7, f"{analysis_result.get('percentage', 0):.2f}%", 1, 1, 'L')
     pdf.ln(8)
 
-    # 3. Visual Analysis Helper
-    def add_image_to_pdf(pdf_doc, image_obj, title, caption):
-        pdf_doc.set_font(pdf.font_family, 'B', 11)
+    # 3. Images
+    def add_img(pdf_doc, img, title):
+        if img is None: return
+        pdf_doc.set_font('helvetica', 'B', 11)
         pdf_doc.cell(0, 7, title, 0, 1, 'L')
-        pdf_doc.set_font(pdf.font_family, 'I', 9)
-        pdf_doc.multi_cell(0, 5, caption, 0, 'L')
-        pdf_doc.ln(2)
         
-        if image_obj:
-            # Create a temporary file to save the PIL image for FPDF
-            # 'delete=False' is safer for Windows/Linux cross-compatibility in temp folders
-            fd, temp_path = tempfile.mkstemp(suffix=".png")
-            try:
-                # Close the file descriptor immediately so PIL can save to the path
-                os.close(fd)
-                image_obj.save(temp_path, format="PNG")
-                
-                # Check height to avoid breaking the layout
-                if pdf_doc.get_y() > 180:
-                    pdf_doc.add_page()
-                
-                # Center the image roughly
-                pdf_doc.image(temp_path, x=50, w=110)
-                pdf_doc.ln(5)
-            except Exception as e:
-                pdf_doc.set_text_color(200, 0, 0)
-                pdf_doc.cell(0, 10, f"Image Error: {str(e)}", 0, 1)
-                pdf_doc.set_text_color(0, 0, 0)
-            finally:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            img.save(tmp.name, format="PNG")
+            tmp_path = tmp.name
+        
+        try:
+            # Automatic page break if image won't fit
+            if pdf_doc.get_y() > 180:
+                pdf_doc.add_page()
+            pdf_doc.image(tmp_path, x=40, w=120)
+            pdf_doc.ln(5)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
-    add_image_to_pdf(pdf, uploaded_image, 'A. Original Sample', 'Raw microscopic input provided.')
-    add_image_to_pdf(pdf, grad_cam_image, 'B. Heatmap Visualization', 'AI focus areas highlighting diagnostic indicators (Red/Yellow = High Significance).')
+    add_img(pdf, proc_uploaded, 'A. Original Sample')
+    add_img(pdf, proc_gradcam, 'B. AI Heatmap Analysis')
     
     # 4. Disclaimer
     pdf.ln(5)
-    pdf.set_font(pdf.font_family, 'B', 12)
+    pdf.set_font('helvetica', 'B', 12)
     pdf.cell(0, 8, '4. Disclaimer', 0, 1, 'L')
-    pdf.set_font(pdf.font_family, 'I', 9)
+    pdf.set_font('helvetica', 'I', 9)
     pdf.set_text_color(150, 0, 0)
-    disclaimer = ("This report is generated by an experimental AI model. It is NOT a final medical diagnosis. "
-                  "All findings must be reviewed and validated by a licensed clinical pathologist or medical professional.")
-    pdf.multi_cell(0, 5, disclaimer, 0, 'J')
-    
-    # --- FINAL BYTE OUTPUT ---
+    pdf.multi_cell(0, 5, "Experimental AI report. Not for final clinical diagnosis. Consult a professional.")
+
+    # --- RETURN AS BYTES ---
+    # Most reliable way to handle string vs bytes in FPDF
     try:
-        # dest='S' returns the document as a string (standard FPDF)
-        # We then encode it to bytes for Streamlit download button
-        pdf_str = pdf.output(dest='S')
-        if isinstance(pdf_str, str):
-            return pdf_str.encode('latin-1', errors='replace')
-        return pdf_str # Already bytes in some fpdf2 versions
+        raw_output = pdf.output(dest='S')
+        if isinstance(raw_output, str):
+            return raw_output.encode('latin-1')
+        return raw_output
     except Exception as e:
-        # Final fallback
-        st.error(f"Failed to finalize PDF: {e}")
-        return None
+        # If this fails, the error will be visible in the streamlit console
+        print(f"PDF FINAL ERROR: {e}")
+        raise e
         
 import streamlit as st
 import time
@@ -688,6 +676,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
