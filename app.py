@@ -1,4 +1,4 @@
-        import streamlit as st
+import streamlit as st
 from PIL import Image
 import time
 import hashlib 
@@ -678,3 +678,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
